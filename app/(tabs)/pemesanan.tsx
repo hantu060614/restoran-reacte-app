@@ -1,657 +1,947 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import {
-    Alert,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  FlatList,
+  Modal,
+  ScrollView,
+  SafeAreaView,
+  Animated,
+  TextInput,
 } from "react-native";
-
+import { Ionicons } from "@expo/vector-icons";
+import { Image } from "expo-image";
 import {
-    addDoc,
-    collection,
-    getDocs,
+  addDoc,
+  collection,
+  getDocs,
+  onSnapshot,
+  serverTimestamp,
+  query,
+  orderBy,
+  limit,
 } from "firebase/firestore";
 
 import { db } from "../../config/firebase";
 
+// --- THEME ---
+const THEME = {
+  background: "#0F172A",
+  surface: "#1E293B",
+  primary: "#F97316",
+  textMain: "#F8FAFC",
+  textSecondary: "#94A3B8",
+  inputBg: "#334155",
+  success: "#10B981",
+  danger: "#EF4444",
+};
+
+// --- TYPES ---
 type Menu = {
   id: string;
-  kode_menu: string;
-  nama_menu: string;
+  kode: string;
+  nama: string;
   kategori: string;
   harga: number;
   keterangan: string;
+  imageUrl: string;
+  tersedia: boolean;
 };
 
-type ItemPesanan = {
-  kode_menu: string;
-  nama_menu: string;
-  kategori: string;
+type CartItem = {
+  menuId: string;
+  nama: string;
   harga: number;
-  jumlah: number;
+  qty: number;
   subtotal: number;
 };
 
+type PaymentMethod = "Cash" | "QRIS" | "Transfer Bank";
+
 export default function PemesananScreen() {
   const [menus, setMenus] = useState<Menu[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [kategoriFilter, setKategoriFilter] = useState<string>("Semua");
 
-  const [kodePesan, setKodePesan] = useState("");
-  const [atasnama, setAtasnama] = useState("");
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod | null>(null);
+  
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [isCheckoutModalVisible, setCheckoutModalVisible] = useState(false);
+  const [metodePembayaran, setMetodePembayaran] = useState("Tunai");
+  const [tipePesanan, setTipePesanan] = useState("Makan di Tempat");
+  const [nomorMeja, setNomorMeja] = useState("");
+  const [diskonStr, setDiskonStr] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [receiptModalVisible, setReceiptModalVisible] = useState(false);
+  const [lastOrder, setLastOrder] = useState<any>(null);
 
-  const [kodeMenu, setKodeMenu] = useState("");
-  const [namaMenu, setNamaMenu] = useState("");
-  const [kategori, setKategori] = useState("");
-  const [harga, setHarga] = useState(0);
-  const [jumlah, setJumlah] = useState("1");
-
-  const [showMenuList, setShowMenuList] = useState(false);
-  const [items, setItems] = useState<ItemPesanan[]>([]);
-
+  // Fetch menus real-time
   useEffect(() => {
-    getMenus();
-    buatKodePesanOtomatis();
+    const unsubscribe = onSnapshot(collection(db, "tbmenu"), (snapshot) => {
+      const fetchedMenus: Menu[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        fetchedMenus.push({
+          id: doc.id,
+          nama: data.nama || data.nama_menu || "",
+          kode: data.kode || data.kode_menu || "",
+          harga: Number(data.harga || 0),
+          kategori: data.kategori || "Makanan",
+          keterangan: data.keterangan || "",
+          imageUrl: data.imageUrl || "",
+          tersedia: data.tersedia !== undefined ? data.tersedia : (data.keterangan === "Tersedia"),
+        });
+      });
+      setMenus(fetchedMenus);
+      setLoading(false);
+    }, (err) => {
+      console.log("Error fetching menus:", err);
+      Alert.alert("Error", "Gagal memuat menu dari server.");
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  async function getMenus() {
+  // Filtered menus
+  const filteredMenus = useMemo(() => {
+    if (kategoriFilter === "Semua") return menus;
+    return menus.filter(m => m.kategori === kategoriFilter);
+  }, [menus, kategoriFilter]);
+
+  // Cart Calculations
+  const subtotal = cart.reduce((sum, item) => sum + (item.harga * item.qty), 0);
+  const diskon = parseInt(diskonStr) || 0;
+  const subtotalAfterDiskon = Math.max(0, subtotal - diskon);
+  const pajak = subtotalAfterDiskon * 0.1;
+  const total = subtotalAfterDiskon + pajak;
+  const totalQty = cart.reduce((sum, item) => sum + item.qty, 0);
+
+  const handleProcessCheckout = async () => {
+    if (tipePesanan === "Makan di Tempat" && !nomorMeja.trim()) {
+      Alert.alert("Gagal", "Silakan isi Nomor Meja untuk Makan di Tempat.");
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
-      const snapshot = await getDocs(collection(db, "tbmenu"));
-
-      const data: Menu[] = snapshot.docs.map((document) => {
-        const item = document.data();
-
-        return {
-          id: document.id,
-          kode_menu: item.kode_menu || "",
-          nama_menu: item.nama_menu || "",
-          kategori: item.kategori || "",
-          harga: Number(item.harga || 0),
-          keterangan: item.keterangan || "",
-        };
+      const orderId = "ORD-" + Date.now().toString().slice(-6);
+      await addDoc(collection(db, "tbpemesanan"), {
+        orderId,
+        items: cart,
+        subtotal,
+        diskon,
+        pajak,
+        total,
+        metodePembayaran,
+        tipePesanan,
+        nomorMeja: tipePesanan === "Makan di Tempat" ? nomorMeja : "-",
+        status: "dimasak", // FastFood style: pay first, then cook
+        createdAt: serverTimestamp(),
       });
-
-      setMenus(data);
-    } catch (error) {
-      console.log("Gagal mengambil data menu:", error);
-      Alert.alert("Error", "Gagal mengambil data menu.");
+      setCart([]);
+      setCheckoutModalVisible(false);
+      setIsCartOpen(false);
+      setTipePesanan("Makan di Tempat");
+      setNomorMeja("");
+      setDiskonStr("");
+      Alert.alert("Sukses", `Pesanan ${orderId} berhasil dibayar & masuk ke Dapur!`);
+    } catch (error: any) {
+      console.log("Error checkout:", error);
+      Alert.alert("Gagal", "Terjadi kesalahan saat memproses pembayaran.");
+    } finally {
+      setIsSubmitting(false);
     }
-  }
+  };
 
-  async function buatKodePesanOtomatis() {
-    try {
-      const snapshot = await getDocs(collection(db, "tbpemesanan"));
-
-      let nomorTerbesar = 0;
-
-      snapshot.docs.forEach((document) => {
-        const data = document.data();
-        const kode = data.kode_pesan || "";
-
-        if (kode.startsWith("PE")) {
-          const angka = parseInt(kode.replace("PE", ""), 10);
-
-          if (!isNaN(angka) && angka > nomorTerbesar) {
-            nomorTerbesar = angka;
-          }
-        }
-      });
-
-      const nomorBaru = nomorTerbesar + 1;
-      const kodeBaru = "PE" + nomorBaru.toString().padStart(3, "0");
-
-      setKodePesan(kodeBaru);
-    } catch (error) {
-      console.log("Gagal membuat kode otomatis:", error);
-      setKodePesan("PE001");
-    }
-  }
-
-  function pilihMenu(menu: Menu) {
-    setKodeMenu(menu.kode_menu);
-    setNamaMenu(menu.nama_menu);
-    setKategori(menu.kategori);
-    setHarga(menu.harga);
-    setJumlah("1");
-    setShowMenuList(false);
-  }
-
-  function tambahKeTabelPesanan() {
-    if (atasnama.trim() === "") {
-      Alert.alert("Peringatan", "Atas nama wajib diisi terlebih dahulu.");
-      return;
-    }
-
-    if (kodeMenu.trim() === "") {
-      Alert.alert("Peringatan", "Silakan pilih menu makanan/minuman.");
-      return;
-    }
-
-    const jumlahNumber = Number(jumlah || 0);
-
-    if (jumlahNumber <= 0) {
-      Alert.alert("Peringatan", "Jumlah pesanan harus lebih dari 0.");
-      return;
-    }
-
-    const subtotal = harga * jumlahNumber;
-
-    const itemBaru: ItemPesanan = {
-      kode_menu: kodeMenu,
-      nama_menu: namaMenu,
-      kategori: kategori,
-      harga: harga,
-      jumlah: jumlahNumber,
-      subtotal: subtotal,
-    };
-
-    setItems([...items, itemBaru]);
-
-    setKodeMenu("");
-    setNamaMenu("");
-    setKategori("");
-    setHarga(0);
-    setJumlah("1");
-  }
-
-  function hapusItem(index: number) {
-    const dataBaru = items.filter((_, i) => i !== index);
-    setItems(dataBaru);
-  }
-
-  const totalBayar = items.reduce((total, item) => {
-    return total + item.subtotal;
-  }, 0);
-
-  async function pembayaran() {
-    if (kodePesan.trim() === "" || atasnama.trim() === "") {
-      Alert.alert("Peringatan", "Kode pesan dan atas nama wajib diisi.");
-      return;
-    }
-
-    if (items.length === 0) {
-      Alert.alert("Peringatan", "Belum ada menu yang dimasukkan ke tabel pemesanan.");
-      return;
-    }
-
-    try {
-      const tanggal = new Date().toLocaleDateString("id-ID");
-      const jam = new Date().toLocaleTimeString("id-ID");
-
-      for (const item of items) {
-        await addDoc(collection(db, "tbpemesanan"), {
-          kode_pesan: kodePesan,
-          atasnama: atasnama,
-          kode_menu: item.kode_menu,
-          nama_menu: item.nama_menu,
-          kategori: item.kategori,
-          harga: item.harga,
-          jumlah: item.jumlah,
-          subtotal: item.subtotal,
-          total_bayar: totalBayar,
-          tanggal: tanggal,
-          jam: jam,
-        });
+  // Cart Actions
+  const addToCart = (menu: Menu) => {
+    if (!menu.tersedia) return;
+    
+    setCart(prev => {
+      const existing = prev.find(item => item.menuId === menu.id);
+      if (existing) {
+        return prev.map(item => 
+          item.menuId === menu.id 
+            ? { ...item, qty: item.qty + 1, subtotal: (item.qty + 1) * item.harga }
+            : item
+        );
       }
+      return [...prev, {
+        menuId: menu.id,
+        nama: menu.nama,
+        harga: menu.harga,
+        qty: 1,
+        subtotal: menu.harga
+      }];
+    });
+  };
 
-      const detailStruk = items
-        .map((item, index) => {
-          return `${index + 1}. ${item.nama_menu}\n   ${item.jumlah} x Rp ${item.harga.toLocaleString(
-            "id-ID"
-          )} = Rp ${item.subtotal.toLocaleString("id-ID")}`;
-        })
-        .join("\n\n");
+  const updateQty = (menuId: string, delta: number) => {
+    setCart(prev => {
+      return prev.map(item => {
+        if (item.menuId === menuId) {
+          const newQty = item.qty + delta;
+          if (newQty <= 0) return null as any; // marked for deletion
+          return { ...item, qty: newQty, subtotal: newQty * item.harga };
+        }
+        return item;
+      }).filter(Boolean); // remove nulls
+    });
+  };
 
-      Alert.alert(
-        "Struk Pembayaran",
-        `RESTORAN FIREBASE\n\nKode Pesan: ${kodePesan}\nAtas Nama: ${atasnama}\nTanggal: ${tanggal}\nJam: ${jam}\n\n${detailStruk}\n\nTotal Bayar: Rp ${totalBayar.toLocaleString(
-          "id-ID"
-        )}\n\nTerima kasih atas pesanan Anda.`
-      );
+  const removeItem = (menuId: string) => {
+    setCart(prev => prev.filter(item => item.menuId !== menuId));
+  };
 
-      resetTransaksi();
-    } catch (error) {
-      console.log("Gagal menyimpan pembayaran:", error);
-      Alert.alert("Error", "Gagal menyimpan pembayaran ke Firebase.");
-    }
-  }
+  // --- RENDERERS ---
 
-  function resetTransaksi() {
-    setAtasnama("");
-    setKodeMenu("");
-    setNamaMenu("");
-    setKategori("");
-    setHarga(0);
-    setJumlah("1");
-    setItems([]);
-    setShowMenuList(false);
-    buatKodePesanOtomatis();
-  }
+  const renderSkeleton = () => (
+    <FlatList
+      data={[1, 2, 3, 4, 5, 6]}
+      numColumns={2}
+      keyExtractor={item => item.toString()}
+      columnWrapperStyle={styles.menuGridRow}
+      renderItem={() => (
+        <View style={styles.skeletonCard}>
+          <View style={styles.skeletonImage} />
+          <View style={{ padding: 12 }}>
+            <View style={styles.skeletonTextLarge} />
+            <View style={styles.skeletonTextSmall} />
+            <View style={styles.skeletonButton} />
+          </View>
+        </View>
+      )}
+    />
+  );
 
-  return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <ScrollView showsVerticalScrollIndicator={false}>
-        <Text style={styles.header}>Pemesanan</Text>
-        <Text style={styles.subHeader}>
-          Satu kode pesan dapat memiliki lebih dari satu menu
-        </Text>
-
-        <View style={styles.formCard}>
-          <Text style={styles.formTitle}>Form Pemesanan</Text>
-
-          <TextInput
-            style={styles.inputDisabled}
-            placeholder="Kode Pesan"
-            placeholderTextColor="#9ca3af"
-            value={kodePesan}
-            editable={false}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Atas Nama"
-            placeholderTextColor="#9ca3af"
-            value={atasnama}
-            onChangeText={setAtasnama}
-          />
-
-          <TouchableOpacity
-            style={styles.selectButton}
-            onPress={() => setShowMenuList(!showMenuList)}
-          >
-            <Text style={styles.selectText}>
-              {kodeMenu === ""
-                ? "Pilih Menu Makanan/Minuman"
-                : `${kodeMenu} - ${namaMenu}`}
-            </Text>
-          </TouchableOpacity>
-
-          {showMenuList && (
-            <View style={styles.menuList}>
-              {menus.length === 0 ? (
-                <Text style={styles.empty}>Data menu belum ada.</Text>
-              ) : (
-                menus.map((item) => (
-                  <TouchableOpacity
-                    key={item.id}
-                    style={styles.menuOption}
-                    onPress={() => pilihMenu(item)}
-                  >
-                    <Text style={styles.menuTitle}>
-                      {item.kode_menu} - {item.nama_menu}
-                    </Text>
-                    <Text style={styles.menuText}>
-                      {item.kategori} | Rp {item.harga.toLocaleString("id-ID")}
-                    </Text>
-                  </TouchableOpacity>
-                ))
-              )}
+  const renderMenuCard = ({ item }: { item: Menu }) => {
+    const isHabis = !item.tersedia;
+    return (
+      <TouchableOpacity 
+        style={[styles.menuCard, isHabis && styles.menuCardHabis]}
+        activeOpacity={0.7}
+        onPress={() => addToCart(item)}
+        disabled={isHabis}
+      >
+        <View style={styles.menuImageContainer}>
+          {item.imageUrl ? (
+            <Image source={{ uri: item.imageUrl }} style={styles.menuImage} contentFit="cover" />
+          ) : (
+            <Ionicons name="fast-food" size={40} color={THEME.inputBg} />
+          )}
+          {isHabis && (
+            <View style={styles.habisOverlay}>
+              <Text style={styles.habisText}>HABIS</Text>
             </View>
           )}
+        </View>
+        <View style={styles.menuInfo}>
+          <Text style={styles.menuName} numberOfLines={2}>{item.nama}</Text>
+          <Text style={styles.menuPrice}>Rp {item.harga.toLocaleString("id-ID")}</Text>
+          <View style={[styles.addButton, isHabis && { backgroundColor: THEME.inputBg }]}>
+            <Ionicons name="add" size={20} color="#fff" />
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
-          <TextInput
-            style={styles.inputDisabled}
-            placeholder="Nama Menu"
-            placeholderTextColor="#9ca3af"
-            value={namaMenu}
-            editable={false}
-          />
-
-          <TextInput
-            style={styles.inputDisabled}
-            placeholder="Kategori"
-            placeholderTextColor="#9ca3af"
-            value={kategori}
-            editable={false}
-          />
-
-          <TextInput
-            style={styles.inputDisabled}
-            placeholder="Harga"
-            placeholderTextColor="#9ca3af"
-            value={harga === 0 ? "" : `Rp ${harga.toLocaleString("id-ID")}`}
-            editable={false}
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Jumlah"
-            placeholderTextColor="#9ca3af"
-            keyboardType="numeric"
-            value={jumlah}
-            onChangeText={setJumlah}
-          />
-
-          <TouchableOpacity
-            style={styles.addButton}
-            onPress={tambahKeTabelPesanan}
-          >
-            <Text style={styles.saveText}>Masukkan ke Tabel Pemesanan</Text>
-          </TouchableOpacity>
+  return (
+    <View style={styles.container}>
+      <SafeAreaView style={{ flex: 1 }}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Kasir & Pesanan</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
+            {["Semua", "Makanan", "Minuman"].map(kat => (
+              <TouchableOpacity 
+                key={kat}
+                style={[styles.filterPill, kategoriFilter === kat && styles.filterPillActive]}
+                onPress={() => setKategoriFilter(kat)}
+              >
+                <Text style={[styles.filterText, kategoriFilter === kat && styles.filterTextActive]}>
+                  {kat}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
         </View>
 
-        <Text style={styles.listTitle}>Tabel Pemesanan</Text>
+        <View style={styles.menuListContainer}>
+          {loading ? (
+            renderSkeleton()
+          ) : filteredMenus.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="restaurant-outline" size={60} color={THEME.inputBg} />
+              <Text style={styles.emptyText}>Tidak ada menu yang ditemukan.</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={filteredMenus}
+              keyExtractor={item => item.id}
+              numColumns={2}
+              columnWrapperStyle={styles.menuGridRow}
+              renderItem={renderMenuCard}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ paddingBottom: 100 }}
+            />
+          )}
+        </View>
 
-        <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-          <View style={styles.table}>
-            <View style={styles.tableHeader}>
-              <Text style={[styles.th, styles.colNo]}>No</Text>
-              <Text style={[styles.th, styles.colKode]}>Kode</Text>
-              <Text style={[styles.th, styles.colNama]}>Nama Menu</Text>
-              <Text style={[styles.th, styles.colKategori]}>Kategori</Text>
-              <Text style={[styles.th, styles.colHarga]}>Harga</Text>
-              <Text style={[styles.th, styles.colJumlah]}>Jml</Text>
-              <Text style={[styles.th, styles.colTotal]}>Subtotal</Text>
-              <Text style={[styles.th, styles.colAksi]}>Aksi</Text>
+        {cart.length > 0 && !isCartOpen && (
+          <TouchableOpacity 
+            style={styles.floatingCart} 
+            activeOpacity={0.9}
+            onPress={() => setIsCartOpen(true)}
+          >
+            <View style={styles.floatingCartLeft}>
+              <View style={styles.cartBadge}>
+                <Text style={styles.cartBadgeText}>{totalQty}</Text>
+              </View>
+              <Text style={styles.floatingCartText}>Lihat Keranjang</Text>
+            </View>
+            <Text style={styles.floatingCartPrice}>Rp {total.toLocaleString("id-ID")}</Text>
+          </TouchableOpacity>
+        )}
+      </SafeAreaView>
+
+      <Modal
+        visible={isCartOpen}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setIsCartOpen(false)}
+      >
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalOverlay}>
+          <View style={styles.bottomSheet}>
+            <View style={styles.sheetHeader}>
+              <Text style={styles.sheetTitle}>Keranjang ({totalQty})</Text>
+              <TouchableOpacity onPress={() => setIsCartOpen(false)} style={styles.closeBtn}>
+                <Ionicons name="close" size={24} color={THEME.textMain} />
+              </TouchableOpacity>
             </View>
 
-            {items.length === 0 ? (
-              <View style={styles.emptyRow}>
-                <Text style={styles.empty}>
-                  Belum ada menu yang dimasukkan.
-                </Text>
-              </View>
-            ) : (
-              items.map((item, index) => (
-                <View key={index} style={styles.tableRow}>
-                  <Text style={[styles.td, styles.colNo]}>{index + 1}</Text>
-
-                  <Text style={[styles.td, styles.colKode]}>
-                    {kodePesan}
-                  </Text>
-
-                  <Text style={[styles.td, styles.colNama]}>
-                    {item.nama_menu}
-                  </Text>
-
-                  <Text style={[styles.td, styles.colKategori]}>
-                    {item.kategori}
-                  </Text>
-
-                  <Text style={[styles.td, styles.colHarga]}>
-                    Rp {item.harga.toLocaleString("id-ID")}
-                  </Text>
-
-                  <Text style={[styles.td, styles.colJumlah]}>
-                    {item.jumlah}
-                  </Text>
-
-                  <Text style={[styles.td, styles.colTotal]}>
-                    Rp {item.subtotal.toLocaleString("id-ID")}
-                  </Text>
-
-                  <View style={[styles.colAksi, styles.actionBox]}>
-                    <TouchableOpacity
-                      style={styles.deleteButton}
-                      onPress={() => hapusItem(index)}
-                    >
-                      <Text style={styles.actionText}>Hapus</Text>
+            <ScrollView style={styles.cartList} showsVerticalScrollIndicator={false}>
+              {cart.map(item => (
+                <View key={item.menuId} style={styles.cartItemRow}>
+                  <View style={styles.cartItemInfo}>
+                    <Text style={styles.cartItemName}>{item.nama}</Text>
+                    <Text style={styles.cartItemPrice}>Rp {item.harga.toLocaleString("id-ID")}</Text>
+                  </View>
+                  
+                  <View style={styles.qtyController}>
+                    <TouchableOpacity style={styles.qtyBtn} onPress={() => updateQty(item.menuId, -1)}>
+                      <Ionicons name="remove" size={16} color={THEME.textMain} />
+                    </TouchableOpacity>
+                    <Text style={styles.qtyNumber}>{item.qty}</Text>
+                    <TouchableOpacity style={styles.qtyBtn} onPress={() => updateQty(item.menuId, 1)}>
+                      <Ionicons name="add" size={16} color={THEME.textMain} />
                     </TouchableOpacity>
                   </View>
+
+                  <TouchableOpacity style={styles.deleteBtn} onPress={() => removeItem(item.menuId)}>
+                    <Ionicons name="trash-outline" size={18} color={THEME.danger} />
+                  </TouchableOpacity>
                 </View>
-              ))
+              ))}
+            </ScrollView>
+
+            {cart.length > 0 && (
+              <ScrollView style={styles.checkoutScroll} showsVerticalScrollIndicator={false}>
+                <Text style={styles.modalTitle}>Detail Pembayaran</Text>
+
+                <Text style={styles.sectionLabel}>Tipe Pesanan</Text>
+                <View style={styles.methodRow}>
+                  {["Makan di Tempat", "Bungkus"].map(tipe => (
+                    <TouchableOpacity
+                      key={tipe}
+                      style={[styles.methodCard, tipePesanan === tipe && styles.methodCardActive]}
+                      onPress={() => setTipePesanan(tipe)}
+                    >
+                      <Ionicons 
+                        name={tipe === "Bungkus" ? "bag-handle-outline" : "restaurant-outline"} 
+                        size={24} 
+                        color={tipePesanan === tipe ? THEME.primary : THEME.textSecondary} 
+                      />
+                      <Text style={[styles.methodText, tipePesanan === tipe && styles.methodTextActive]}>{tipe}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {tipePesanan === "Makan di Tempat" && (
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={styles.sectionLabel}>Nomor Meja</Text>
+                    <TextInput
+                      style={styles.inputBox}
+                      placeholder="Contoh: 12"
+                      placeholderTextColor={THEME.textSecondary}
+                      value={nomorMeja}
+                      onChangeText={setNomorMeja}
+                      keyboardType="number-pad"
+                    />
+                  </View>
+                )}
+
+                <Text style={styles.sectionLabel}>Metode Pembayaran</Text>
+                <View style={styles.methodRow}>
+                  {["Tunai", "QRIS", "Kartu"].map(method => (
+                    <TouchableOpacity
+                      key={method}
+                      style={[styles.methodCard, metodePembayaran === method && styles.methodCardActive]}
+                      onPress={() => setMetodePembayaran(method)}
+                    >
+                      <Ionicons 
+                        name={method === "Tunai" ? "cash-outline" : method === "QRIS" ? "qr-code-outline" : "card-outline"} 
+                        size={24} 
+                        color={metodePembayaran === method ? THEME.primary : THEME.textSecondary} 
+                      />
+                      <Text style={[styles.methodText, metodePembayaran === method && styles.methodTextActive]}>{method}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <Text style={styles.sectionLabel}>Diskon (Rp)</Text>
+                <TextInput
+                  style={styles.inputBox}
+                  placeholder="0"
+                  placeholderTextColor={THEME.textSecondary}
+                  value={diskonStr}
+                  onChangeText={setDiskonStr}
+                  keyboardType="number-pad"
+                />
+
+                <View style={styles.divider} />
+
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Subtotal</Text>
+                  <Text style={styles.summaryValue}>Rp {subtotal.toLocaleString("id-ID")}</Text>
+                </View>
+                {diskon > 0 && (
+                  <View style={styles.summaryRow}>
+                    <Text style={styles.summaryLabel}>Diskon</Text>
+                    <Text style={[styles.summaryValue, {color: THEME.danger}]}>- Rp {diskon.toLocaleString("id-ID")}</Text>
+                  </View>
+                )}
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>PPN (10%)</Text>
+                  <Text style={styles.summaryValue}>Rp {pajak.toLocaleString("id-ID")}</Text>
+                </View>
+                <View style={styles.totalRow}>
+                  <Text style={styles.totalLabel}>Total Bayar</Text>
+                  <Text style={styles.totalValue}>Rp {total.toLocaleString("id-ID")}</Text>
+                </View>
+
+                <TouchableOpacity 
+                  style={[styles.processBtn, isSubmitting && { opacity: 0.7 }]} 
+                  onPress={handleProcessCheckout}
+                  disabled={isSubmitting}
+                >
+                  <Text style={styles.processBtnText}>{isSubmitting ? "Memproses..." : "Konfirmasi Pembayaran"}</Text>
+                </TouchableOpacity>
+              </ScrollView>
             )}
           </View>
-        </ScrollView>
-
-        <View style={styles.totalBox}>
-          <Text style={styles.totalLabel}>Total Bayar Seluruh Pesanan</Text>
-          <Text style={styles.totalText}>
-            Rp {totalBayar.toLocaleString("id-ID")}
-          </Text>
-        </View>
-
-        <TouchableOpacity style={styles.payButton} onPress={pembayaran}>
-          <Text style={styles.saveText}>Pembayaran / Cetak Struk</Text>
-        </TouchableOpacity>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        </KeyboardAvoidingView>
+      </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#111827",
-    padding: 20,
+    backgroundColor: THEME.background,
   },
-
   header: {
-    color: "#ffffff",
-    fontSize: 30,
-    fontWeight: "bold",
-    marginTop: 35,
+    paddingHorizontal: 24,
+    paddingTop: Platform.OS === 'android' ? 40 : 20,
+    paddingBottom: 10,
   },
-
-  subHeader: {
-    color: "#d1d5db",
-    marginTop: 5,
-    marginBottom: 18,
+  headerTitle: {
+    color: THEME.textMain,
+    fontSize: 28,
+    fontWeight: "800",
+    marginBottom: 16,
   },
-
-  formCard: {
-    backgroundColor: "#1f2937",
-    borderRadius: 18,
-    padding: 16,
+  filterScroll: {
+    flexDirection: "row",
+  },
+  filterPill: {
+    backgroundColor: THEME.surface,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+    marginRight: 10,
     borderWidth: 1,
-    borderColor: "#374151",
-    marginBottom: 22,
+    borderColor: THEME.inputBg,
   },
-
-  formTitle: {
-    color: "#ffffff",
-    fontSize: 20,
-    fontWeight: "bold",
-    marginBottom: 14,
+  filterPillActive: {
+    backgroundColor: THEME.primary,
+    borderColor: THEME.primary,
   },
-
-  input: {
-    backgroundColor: "#111827",
-    borderWidth: 1,
-    borderColor: "#374151",
-    borderRadius: 12,
-    padding: 14,
-    color: "#ffffff",
-    marginBottom: 12,
+  filterText: {
+    color: THEME.textSecondary,
+    fontWeight: "600",
+    fontSize: 14,
   },
-
-  inputDisabled: {
-    backgroundColor: "#374151",
-    borderRadius: 12,
-    padding: 14,
-    color: "#e5e7eb",
-    marginBottom: 12,
+  filterTextActive: {
+    color: "#fff",
   },
-
-  selectButton: {
-    backgroundColor: "#f97316",
-    padding: 14,
-    borderRadius: 12,
-    marginBottom: 12,
+  menuListContainer: {
+    flex: 1,
+    paddingHorizontal: 20,
+    marginTop: 10,
   },
-
-  selectText: {
-    color: "#ffffff",
-    fontWeight: "bold",
-    textAlign: "center",
+  menuGridRow: {
+    justifyContent: "space-between",
   },
-
-  menuList: {
-    backgroundColor: "#111827",
-    borderWidth: 1,
-    borderColor: "#374151",
-    borderRadius: 12,
-    padding: 10,
-    marginBottom: 12,
-  },
-
-  menuOption: {
-    backgroundColor: "#1f2937",
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 8,
-  },
-
-  menuTitle: {
-    color: "#ffffff",
-    fontWeight: "bold",
-  },
-
-  menuText: {
-    color: "#d1d5db",
-    marginTop: 4,
-  },
-
-  addButton: {
-    backgroundColor: "#f97316",
-    padding: 15,
-    borderRadius: 12,
-    alignItems: "center",
-  },
-
-  payButton: {
-    backgroundColor: "#16a34a",
-    padding: 16,
-    borderRadius: 14,
-    alignItems: "center",
-    marginBottom: 35,
-  },
-
-  saveText: {
-    color: "#ffffff",
-    fontWeight: "bold",
-    fontSize: 15,
-  },
-
-  listTitle: {
-    color: "#ffffff",
-    fontSize: 22,
-    fontWeight: "bold",
-    marginBottom: 12,
-  },
-
-  table: {
-    minWidth: 930,
-    borderWidth: 1,
-    borderColor: "#374151",
-    borderRadius: 12,
+  menuCard: {
+    width: "48%",
+    backgroundColor: THEME.surface,
+    borderRadius: 16,
+    marginBottom: 16,
     overflow: "hidden",
+  },
+  menuCardHabis: {
+    opacity: 0.5,
+  },
+  menuImageContainer: {
+    height: 120,
+    backgroundColor: THEME.inputBg,
+    justifyContent: "center",
+    alignItems: "center",
+    position: "relative",
+  },
+  menuImage: {
+    width: "100%",
+    height: "100%",
+  },
+  habisOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  habisText: {
+    color: "#fff",
+    fontWeight: "900",
+    letterSpacing: 2,
+    transform: [{ rotate: "-15deg" }],
+  },
+  menuInfo: {
+    padding: 12,
+    position: "relative",
+  },
+  menuName: {
+    color: THEME.textMain,
+    fontSize: 14,
+    fontWeight: "700",
+    marginBottom: 4,
+    height: 40, 
+  },
+  menuPrice: {
+    color: THEME.primary,
+    fontSize: 14,
+    fontWeight: "bold",
+  },
+  addButton: {
+    position: "absolute",
+    bottom: 12,
+    right: 12,
+    backgroundColor: THEME.primary,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  skeletonCard: {
+    width: "48%",
+    backgroundColor: THEME.surface,
+    borderRadius: 16,
+    marginBottom: 16,
+    overflow: "hidden",
+  },
+  skeletonImage: {
+    height: 120,
+    backgroundColor: THEME.inputBg,
+  },
+  skeletonTextLarge: {
+    height: 14,
+    backgroundColor: THEME.inputBg,
+    borderRadius: 4,
+    marginBottom: 8,
+    width: "80%",
+  },
+  skeletonTextSmall: {
+    height: 14,
+    backgroundColor: THEME.inputBg,
+    borderRadius: 4,
+    width: "50%",
+  },
+  skeletonButton: {
+    position: "absolute",
+    bottom: 12,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: THEME.inputBg,
+  },
+  floatingCart: {
+    position: "absolute",
+    bottom: 24,
+    left: 24,
+    right: 24,
+    backgroundColor: THEME.primary,
+    borderRadius: 16,
+    padding: 16,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    shadowColor: THEME.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  floatingCartLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  cartBadge: {
+    backgroundColor: "#fff",
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 12,
+  },
+  cartBadgeText: {
+    color: THEME.primary,
+    fontWeight: "bold",
+    fontSize: 14,
+  },
+  floatingCartText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 16,
+  },
+  floatingCartPrice: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 16,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0,0,0,0.6)",
+  },
+  bottomSheet: {
+    backgroundColor: THEME.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    maxHeight: "90%",
+  },
+  sheetHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     marginBottom: 20,
   },
-
-  tableHeader: {
-    flexDirection: "row",
-    backgroundColor: "#f97316",
-    paddingVertical: 12,
-    alignItems: "center",
+  sheetTitle: {
+    color: THEME.textMain,
+    fontSize: 20,
+    fontWeight: "800",
   },
-
-  tableRow: {
-    flexDirection: "row",
-    backgroundColor: "#1f2937",
-    borderBottomWidth: 1,
-    borderBottomColor: "#374151",
-    paddingVertical: 12,
-    alignItems: "center",
+  closeBtn: {
+    backgroundColor: THEME.inputBg,
+    padding: 6,
+    borderRadius: 16,
   },
-
-  th: {
-    color: "#ffffff",
+  cartList: {
+    maxHeight: 200,
+    marginBottom: 16,
+  },
+  cartItemRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: THEME.background,
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 10,
+  },
+  cartItemInfo: {
+    flex: 1,
+  },
+  cartItemName: {
+    color: THEME.textMain,
+    fontWeight: "700",
+    fontSize: 14,
+    marginBottom: 4,
+  },
+  cartItemPrice: {
+    color: THEME.primary,
+    fontWeight: "600",
+    fontSize: 13,
+  },
+  qtyController: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: THEME.inputBg,
+    borderRadius: 8,
+    padding: 4,
+    marginRight: 12,
+  },
+  qtyBtn: {
+    padding: 4,
+  },
+  qtyNumber: {
+    color: THEME.textMain,
     fontWeight: "bold",
-    fontSize: 12,
-    textAlign: "center",
-    paddingHorizontal: 6,
+    marginHorizontal: 12,
+    fontSize: 14,
   },
-
-  td: {
-    color: "#e5e7eb",
-    fontSize: 12,
-    textAlign: "center",
-    paddingHorizontal: 6,
-  },
-
-  colNo: {
-    width: 45,
-  },
-
-  colKode: {
-    width: 90,
-  },
-
-  colNama: {
-    width: 170,
-  },
-
-  colKategori: {
-    width: 120,
-  },
-
-  colHarga: {
-    width: 130,
-  },
-
-  colJumlah: {
-    width: 70,
-  },
-
-  colTotal: {
-    width: 150,
-  },
-
-  colAksi: {
-    width: 110,
-  },
-
-  actionBox: {
-    flexDirection: "row",
-    justifyContent: "center",
-  },
-
-  deleteButton: {
-    backgroundColor: "#dc2626",
-    paddingVertical: 7,
-    paddingHorizontal: 10,
+  deleteBtn: {
+    padding: 8,
+    backgroundColor: "rgba(239, 68, 68, 0.1)",
     borderRadius: 8,
   },
-
-  actionText: {
-    color: "#ffffff",
+  checkoutScroll: {
+    flexGrow: 0,
+  },
+  modalTitle: {
+    color: THEME.textMain,
+    fontSize: 18,
+    fontWeight: "800",
+    marginBottom: 16,
+  },
+  sectionLabel: {
+    color: THEME.textSecondary,
+    fontSize: 14,
+    fontWeight: "600",
+    marginBottom: 10,
+    marginTop: 8,
+  },
+  methodRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 16,
+  },
+  methodCard: {
+    flex: 1,
+    backgroundColor: THEME.background,
+    padding: 12,
+    borderRadius: 12,
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "transparent",
+  },
+  methodCardActive: {
+    borderColor: THEME.primary,
+    backgroundColor: THEME.primary + "10",
+  },
+  methodText: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    marginTop: 6,
+    fontWeight: "600",
+  },
+  methodTextActive: {
+    color: THEME.primary,
+  },
+  inputBox: {
+    backgroundColor: THEME.inputBg,
+    borderRadius: 12,
+    padding: 16,
+    color: THEME.textMain,
+    fontSize: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: THEME.surface,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: THEME.inputBg,
+    marginVertical: 16,
+  },
+  summaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  summaryLabel: {
+    color: THEME.textSecondary,
+    fontSize: 14,
+  },
+  summaryValue: {
+    color: THEME.textMain,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  totalRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 8,
+    marginBottom: 24,
+  },
+  totalLabel: {
+    color: THEME.textMain,
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  totalValue: {
+    color: THEME.primary,
+    fontSize: 24,
+    fontWeight: "900",
+  },
+  processBtn: {
+    backgroundColor: THEME.primary,
+    paddingVertical: 16,
+    borderRadius: 16,
+    alignItems: "center",
+    marginBottom: 40,
+  },
+  processBtnText: {
+    color: "#fff",
+    fontSize: 16,
     fontWeight: "bold",
-    fontSize: 11,
   },
-
-  emptyRow: {
-    backgroundColor: "#1f2937",
-    padding: 18,
+  // Receipt Modal
+  receiptOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
   },
-
-  empty: {
-    color: "#d1d5db",
+  receiptCard: {
+    width: "100%",
+    backgroundColor: THEME.surface,
+    borderRadius: 24,
+    padding: 24,
+  },
+  receiptHeader: {
+    alignItems: "center",
+    marginBottom: 20,
+  },
+  receiptTitle: {
+    color: THEME.textMain,
+    fontSize: 22,
+    fontWeight: "800",
+    marginTop: 12,
+  },
+  receiptBody: {
+    backgroundColor: THEME.background,
+    borderRadius: 16,
+    padding: 20,
+    marginBottom: 20,
+  },
+  receiptOrderId: {
+    color: THEME.textMain,
+    fontWeight: "bold",
+    fontSize: 16,
     textAlign: "center",
   },
-
-  totalBox: {
-    backgroundColor: "#7c2d12",
-    borderRadius: 16,
-    padding: 18,
-    marginBottom: 15,
+  receiptDate: {
+    color: THEME.textSecondary,
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 4,
   },
-
-  totalLabel: {
-    color: "#fed7aa",
-    fontSize: 15,
+  receiptDivider: {
+    height: 1,
+    backgroundColor: THEME.inputBg,
+    marginVertical: 16,
+    borderStyle: "dashed",
+    borderWidth: 1,
+    borderColor: THEME.inputBg,
   },
-
-  totalText: {
-    color: "#ffffff",
-    fontSize: 28,
+  receiptItemRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  receiptItemName: {
+    color: THEME.textSecondary,
+    fontSize: 14,
+    flex: 1,
+  },
+  receiptItemPrice: {
+    color: THEME.textMain,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  receiptSummaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  receiptSummaryLabel: {
+    color: THEME.textSecondary,
+    fontSize: 13,
+  },
+  receiptSummaryValue: {
+    color: THEME.textMain,
+    fontSize: 13,
+  },
+  receiptGrandTotalRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 8,
+  },
+  receiptGrandTotalLabel: {
+    color: THEME.textMain,
+    fontWeight: "900",
+    fontSize: 16,
+  },
+  receiptGrandTotalValue: {
+    color: THEME.primary,
+    fontWeight: "900",
+    fontSize: 16,
+  },
+  receiptMethodBadge: {
+    alignSelf: "center",
+    backgroundColor: THEME.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: THEME.inputBg,
+  },
+  receiptMethodText: {
+    color: THEME.primary,
     fontWeight: "bold",
-    marginTop: 5,
+    fontSize: 12,
   },
+  receiptCloseBtn: {
+    backgroundColor: THEME.inputBg,
+    paddingVertical: 14,
+    borderRadius: 16,
+    alignItems: "center",
+  },
+  receiptCloseText: {
+    color: THEME.textMain,
+    fontWeight: "bold",
+    fontSize: 16,
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 100,
+  },
+  emptyText: {
+    color: THEME.textSecondary,
+    marginTop: 16,
+    fontSize: 16,
+  }
 });

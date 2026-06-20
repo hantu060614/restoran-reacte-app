@@ -5,7 +5,7 @@ import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 export default function Splash() {
   useEffect(() => {
     const timer = setTimeout(() => {
-      router.replace("/dashboard");
+      router.replace("/login");
     }, 2000);
 
     return () => clearTimeout(timer);
@@ -13,7 +13,7 @@ export default function Splash() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Restoran Firebase</Text>
+      <Text style={styles.title}>Restoran Berkah</Text>
       <Text style={styles.subtitle}>Aplikasi Pemesanan Makanan & Minuman</Text>
 
       <ActivityIndicator size="large" color="#f97316" style={{ marginTop: 30 }} />

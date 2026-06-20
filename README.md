@@ -1,50 +1,66 @@
-# Welcome to your Expo app 👋
+# Restoran Berkah (Firebase POS App) 🚀
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Aplikasi Sistem Point of Sale (POS) lengkap berbasis React Native (Expo) dan Firebase (Firestore NoSQL). Aplikasi ini sudah disempurnakan menjadi Sistem Manajemen Restoran penuh dengan fitur-fitur profesional.
 
-## Get started
+## 🌟 Fitur Utama
 
-1. Install dependencies
+1. **Autentikasi Multi-Role (RBAC)**
+   - Akses tab / layar dibatasi sesuai dengan tipe akun yang login.
+   - Tidak perlu registrasi panjang, terdapat 3 Role utama (Admin, Kasir, Dapur).
 
+2. **Alur Fast-Food & Checkout Cerdas**
+   - Kasir dapat memilih *Tipe Pesanan* (**Dine-in** atau **Take-away**).
+   - Terdapat kolom **Nomor Meja** (Wajib isi jika Dine-in).
+   - Fitur **Diskon/Potongan Harga** pada setiap transaksi.
+   - Status pesanan baru otomatis menjadi `"dimasak"`.
+
+3. **Kitchen Display System (KDS) / Layar Dapur**
+   - Tab khusus untuk koki/orang dapur melihat pesanan yang masuk.
+   - Hanya pesanan berstatus `"dimasak"` yang akan tampil di sini.
+   - Terdapat tombol **"Siap Disajikan"** yang akan otomatis mengubah status pesanan menjadi `"selesai"`.
+
+4. **Cetak Struk Thermal Kasir (Print/PDF)**
+   - Transaksi selesai akan tersimpan di halaman *Laporan*.
+   - Tombol **Cetak Struk** akan membuka lembar tagihan dengan gaya *Kertas Thermal POS 58/80mm*.
+   - Rincian struk lengkap termasuk logo, PPN 10%, diskon, tipe pesanan, nomor meja, dll.
+   - Struk bisa dikirim ke printer kasir bluetooth atau disimpan sebagai PDF.
+
+5. **Analisis Grafik (Chart) Pendapatan**
+   - Halaman *Dashboard* menampilkan Bar Chart grafik penjualan selama **7 hari terakhir** secara otomatis dari Firestore.
+   - Ringkasan statistik (Pendapatan Hari Ini, Total Transaksi, Jumlah Menu Aktif).
+
+6. **Gambar Dinamis Berbasis Galeri (Base64)**
+   - Bisa menambahkan foto makanan/minuman dengan upload langsung dari Galeri (menggunakan encoding Base64) tanpa perlu Firebase Storage berbayar.
+
+## 👤 Akun Demo Bawaan
+Silakan gunakan akun berikut saat berada di halaman Login:
+
+| Role | Username | Password | Hak Akses Tab |
+|------|----------|----------|---------------|
+| **Admin** | `admin` | `123` | Semua fitur terbuka (Menu, Kasir, Dapur, Dashboard, Laporan) |
+| **Kasir** | `kasir` | `123` | Hanya layar **Kasir** dan **Laporan** |
+| **Dapur** | `dapur` | `123` | Hanya layar **Dapur** saja |
+
+## 🛠️ Cara Menjalankan Project
+
+1. **Install Dependencies**
    ```bash
    npm install
    ```
-
-2. Start the app
-
+2. **Jalankan Aplikasi Expo**
    ```bash
+   npm run start
+   # atau
    npx expo start
    ```
+3. Tekan `a` untuk membuka di Android Emulator, atau `w` untuk membuka di Browser Web.
 
-In the output, you'll find options to open the app in a
+## 🗄️ Database & Teknologi
+* **Framework:** React Native dengan [Expo Router](https://docs.expo.dev/router/introduction/)
+* **Database:** Firebase Cloud Firestore (NoSQL)
+* **Charts:** `react-native-chart-kit`
+* **Printing:** `expo-print`, `expo-sharing`
+* **Image Picker:** `expo-image-picker`
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
-```
-
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+---
+*Dibuat untuk mempermudah manajemen restoran skala kecil menengah.*
